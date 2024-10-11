@@ -10,12 +10,94 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 from django.conf import settings
 
+from langchain.schema import Document
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+
 from .exception import ParsingError
 
 
-def _cleanup_temp_file(file_path):
-    if os.path.exists(file_path):
-        os.remove(file_path)
+def _load_pdf_pages(file_path):
+    """
+    Loads pages from a PDF file.
+
+    Args:
+        file_path: The path to the PDF file.
+
+    Returns:
+        List: A list of pages from the PDF.
+    """
+    loader = PyPDFLoader(file_path)
+    return loader.load()
+
+
+def _load_json_data(file_path):
+    """
+    Loads data from a JSON file using a jq schema.
+
+    Args:
+        file_path: The path to the JSON file.
+
+    Returns:
+        List: The parsed JSON data.
+    """
+    loader = JSONLoader(
+        file_path=file_path,
+        jq_schema='.content[].body',
+        text_content=False
+    )
+    return loader.load()
+
+
+def _split_pages_into_documents(pages, source_path):
+    """
+    Splits the content of pages into smaller chunks and creates Document objects.
+
+    Args:
+        pages: The list of page contents (either PDF pages or JSON data).
+        source_path: The source file path for metadata.
+
+    Returns:
+        List[Document]: A list of chunked documents with metadata.
+    """
+    splitter = RecursiveCharacterTextSplitter(chunk_size=300, chunk_overlap=50)
+    documents = []
+
+    for i, page in enumerate(pages):
+        chunks = splitter.split_text(page.page_content)
+        for chunk in chunks:
+            documents.append(Document(page_content=chunk, metadata={"source": source_path, "page": i}))
+
+    return documents
+
+
+def _save_temp_file(input_file, suffix):
+    """
+    Saves an uploaded file as a temporary file.
+
+    Args:
+        input_file: The uploaded file.
+        suffix: The suffix to use for the temp file.
+
+    Returns:
+        str: The path to the saved temporary file.
+    """
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
+        temp_file.write(input_file.read())
+        return temp_file.name
+
+
+def _cleanup_temp_file(temp_file_path):
+    """
+    Cleans up the temporary file after processing.
+
+    Args:
+        temp_file_path: The path to the temporary file to be deleted.
+    """
+    if temp_file_path:
+        try:
+            os.remove(temp_file_path)
+        except OSError as e:
+            print(f"Error deleting temporary file: {e}")
 
 
 def process_pdf_document(input_file):
@@ -23,20 +105,18 @@ def process_pdf_document(input_file):
     Processes a PDF file and returns the content of the pages.
     For large PDFs, consider using chunking to load pages in parts.
     """
+    temp_file_path = None
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
-            temp_file.write(input_file.read())
-            temp_file_path = temp_file.name
-        
-        # Load PDF synchronously, for large files switch to async if needed
-        loader = PyPDFLoader(temp_file_path)
-        pages = loader.load()
+        temp_file_path = _save_temp_file(input_file, suffix=".pdf")
+        pages = _load_pdf_pages(temp_file_path)
+        documents = _split_pages_into_documents(pages, temp_file_path)
+
     except Exception as e:
-        raise ParsingError("Error processing PDF document: " + str(e))
+        raise ParsingError(f"Error processing PDF document: {str(e)}")
     finally:
         _cleanup_temp_file(temp_file_path)
 
-    return pages
+    return documents
 
 
 def process_json_document(input_file):
@@ -44,24 +124,18 @@ def process_json_document(input_file):
     Processes a JSON file, extracting the 'body' field using jq.
     For large JSON files, async loading and chunking could improve performance.
     """
+    temp_file_path = None
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".json") as temp_file:
-            temp_file.write(input_file.read())
-            temp_file_path = temp_file.name
-        
-        # Load JSON data using jq schema
-        loader = JSONLoader(
-            file_path=temp_file_path,
-            jq_schema='.content[].body',
-            text_content=False
-        )
-        data = loader.load()
+        temp_file_path = _save_temp_file(input_file, suffix=".json")
+        data = _load_json_data(temp_file_path)
+        documents = _split_pages_into_documents(data, temp_file_path)
+
     except Exception as e:
-        raise ParsingError("Error processing JSON document: " + str(e))
+        raise ParsingError(f"Error processing JSON document: {str(e)}")
     finally:
         _cleanup_temp_file(temp_file_path)
 
-    return data
+    return documents
 
 
 def parse_questions_from_file(questions_file):
@@ -88,7 +162,7 @@ def generate_answers_from_documents(documents, questions):
 
         # Create a vector store from the documents for question-answer retrieval
         vectorstore = InMemoryVectorStore.from_documents(documents, embeddings)
-        retriever = vectorstore.as_retriever()
+        retriever = vectorstore.as_retriever(k=5)
 
         # RAG prompt chain pulled from the hub for simplicity, customize if needed
         prompt = hub.pull("rlm/rag-prompt")
