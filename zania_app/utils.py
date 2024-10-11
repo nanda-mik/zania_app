@@ -1,7 +1,7 @@
 import os
 import tempfile
 import json
-
+import asyncio
 from langchain import hub
 from langchain_core.vectorstores import InMemoryVectorStore
 from langchain_openai import OpenAI, OpenAIEmbeddings
@@ -9,34 +9,33 @@ from langchain_community.document_loaders import PyPDFLoader, JSONLoader
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 from django.conf import settings
-
 from langchain.schema import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 
 from .exception import ParsingError
 
 
-def _load_pdf_pages(file_path):
+async def _load_pdf_pages(file_path):
     """
-    Loads pages from a PDF file.
-
+    Loads pages from a PDF file asynchronously.
     Args:
         file_path: The path to the PDF file.
-
     Returns:
         List: A list of pages from the PDF.
     """
     loader = PyPDFLoader(file_path)
-    return loader.load()
+    pages = []
+    async for page in loader.alazy_load():
+        pages.append(page)
+
+    return pages
 
 
-def _load_json_data(file_path):
+async def _load_json_data(file_path):
     """
-    Loads data from a JSON file using a jq schema.
-
+    Loads data from a JSON file using a jq schema asynchronously.
     Args:
         file_path: The path to the JSON file.
-
     Returns:
         List: The parsed JSON data.
     """
@@ -45,17 +44,19 @@ def _load_json_data(file_path):
         jq_schema='.content[].body',
         text_content=False
     )
-    return loader.load()
+    pages = []
+    async for page in loader.alazy_load():
+        pages.append(page)
+
+    return pages
 
 
 def _split_pages_into_documents(pages, source_path):
     """
     Splits the content of pages into smaller chunks and creates Document objects.
-
     Args:
         pages: The list of page contents (either PDF pages or JSON data).
         source_path: The source file path for metadata.
-
     Returns:
         List[Document]: A list of chunked documents with metadata.
     """
@@ -72,7 +73,7 @@ def _split_pages_into_documents(pages, source_path):
 
 def _save_temp_file(input_file, suffix):
     """
-    Saves an uploaded file as a temporary file.
+    Saves an uploaded file as a temporary file asynchronously.
 
     Args:
         input_file: The uploaded file.
@@ -100,40 +101,38 @@ def _cleanup_temp_file(temp_file_path):
             print(f"Error deleting temporary file: {e}")
 
 
-def process_pdf_document(input_file):
+async def process_pdf_document(input_file):
     """
-    Processes a PDF file and returns the content of the pages.
-    For large PDFs, consider using chunking to load pages in parts.
+    Processes a PDF file asynchronously and returns the content of the pages.
     """
     temp_file_path = None
     try:
         temp_file_path = _save_temp_file(input_file, suffix=".pdf")
-        pages = _load_pdf_pages(temp_file_path)
+        pages = await _load_pdf_pages(temp_file_path)
         documents = _split_pages_into_documents(pages, temp_file_path)
-
     except Exception as e:
         raise ParsingError(f"Error processing PDF document: {str(e)}")
     finally:
-        _cleanup_temp_file(temp_file_path)
+        if temp_file_path:
+            _cleanup_temp_file(temp_file_path)
 
     return documents
 
 
-def process_json_document(input_file):
+async def process_json_document(input_file):
     """
-    Processes a JSON file, extracting the 'body' field using jq.
-    For large JSON files, async loading and chunking could improve performance.
+    Processes a JSON file asynchronously, extracting the 'body' field using jq.
     """
     temp_file_path = None
     try:
         temp_file_path = _save_temp_file(input_file, suffix=".json")
-        data = _load_json_data(temp_file_path)
+        data = await _load_json_data(temp_file_path)
         documents = _split_pages_into_documents(data, temp_file_path)
-
     except Exception as e:
         raise ParsingError(f"Error processing JSON document: {str(e)}")
     finally:
-        _cleanup_temp_file(temp_file_path)
+        if temp_file_path:
+            _cleanup_temp_file(temp_file_path)
 
     return documents
 
@@ -147,10 +146,9 @@ def parse_questions_from_file(questions_file):
     return questions_json.get('questions', [])
 
 
-def generate_answers_from_documents(documents, questions):
+async def generate_answers_from_documents(documents, questions):
     """
-    Given a list of documents and a list of questions, uses a Retrieval-Augmented Generation
-    (RAG) approach to generate answers.
+    Given a list of documents and a list of questions, uses a Retrieval-Augmented Generation (RAG) approach to generate answers.
     """
     if not documents or not questions:
         raise ParsingError("Documents or questions cannot be empty.")
@@ -178,7 +176,7 @@ def generate_answers_from_documents(documents, questions):
         answers = {}
         for question in questions:
             try:
-                result = rag_chain.invoke(question)
+                result = await asyncio.to_thread(rag_chain.invoke, question)
                 answers[question] = result
             except Exception as e:
                 answers[question] = f"Error generating answer: {str(e)}"

@@ -1,4 +1,3 @@
-from django.views.decorators.csrf import csrf_exempt
 from django.http import JsonResponse
 
 from .utils import (
@@ -8,23 +7,22 @@ from .utils import (
 from .exception import FileTypeError, ParsingError
 
 
-def process_document(document_file):
+async def process_document(document_file):
     """
-    Processes the document based on its file type and returns the processed documents.
+    Processes the document asynchronously based on its file type and returns the processed documents.
     Raises FileTypeError if the file type is unsupported.
     """
     if document_file.name.endswith('.pdf'):
-        return process_pdf_document(document_file)
+        return await process_pdf_document(document_file)
     elif document_file.name.endswith('.json'):
-        return process_json_document(document_file)
+        return await process_json_document(document_file)
     else:
         raise FileTypeError("Unsupported document type")
 
 
-@csrf_exempt
-def ask_endpoint(request):
+async def ask_endpoint(request):
     """
-    Handles POST requests with question and document files,
+    Handles POST requests with question and document files asynchronously,
     returning answers to the questions based on the provided document.
     """
     if request.method != 'POST':
@@ -38,8 +36,8 @@ def ask_endpoint(request):
 
     try:
         questions = parse_questions_from_file(questions_file)
-        documents = process_document(document_file)
-        answers = generate_answers_from_documents(documents, questions)
+        documents = await process_document(document_file)
+        answers = await generate_answers_from_documents(documents, questions)
 
         return JsonResponse({"answers": answers}, status=200)
     except (FileTypeError, ParsingError) as e:
